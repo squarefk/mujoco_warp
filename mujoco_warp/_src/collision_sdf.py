@@ -16,6 +16,9 @@
 from typing import Tuple
 
 import warp as wp
+from newton._src.geometry.sdf_texture import TextureSDFData
+from newton._src.geometry.sdf_texture import texture_sample_sdf_grad_only_hw
+from newton._src.geometry.sdf_texture import texture_sample_sdf_hw
 
 from mujoco_warp._src.collision_core import CollisionContext
 from mujoco_warp._src.collision_core import contact_params
@@ -58,6 +61,8 @@ class VolumeData:
   oct_aabb: wp.array2d[wp.vec3]
   oct_child: wp.array[vec8i]
   oct_coeff: wp.array[vec8]
+  newton_sdf_data: wp.array[TextureSDFData]
+  newton_sdf_index: int = -1
   root: int = 0
   valid: bool = False
 
@@ -100,12 +105,14 @@ def get_sdf_params(
   attributes[2] = g_size[2]
   plugin_index = -1
   volume_data = VolumeData()
+  # Warp zero-initializes structs, so set the optional texture index sentinel explicitly.
+  volume_data.newton_sdf_index = -1
 
   if g_type == GeomType.SDF and plugin_id != -1:
     attributes = plugin_attr[plugin_id]
     plugin_index = plugin[plugin_id]
 
-  elif g_type == GeomType.SDF and mesh_id != -1:
+  elif g_type == GeomType.SDF and mesh_id != -1 and mesh_octadr[mesh_id] != -1:
     octadr = mesh_octadr[mesh_id]
     volume_data.center = oct_aabb[octadr, 0]
     volume_data.half_size = oct_aabb[octadr, 1]
@@ -454,6 +461,8 @@ def sample_volume_grad(xyz: wp.vec3, volume_data: VolumeData) -> wp.vec3:
 
 @wp.func
 def sdf(type: int, p: wp.vec3, attr: vec_pluginattr, sdf_type: int, volume_data: VolumeData, mesh_data: MeshData) -> float:
+  if volume_data.newton_sdf_index >= 0:
+    return texture_sample_sdf_hw(volume_data.newton_sdf_data[volume_data.newton_sdf_index], p)
   # extract first 3 elements as vec3 for primitive sdf functions
   attr_vec3 = wp.vec3(attr[0], attr[1], attr[2])
   if type == GeomType.PLANE:
@@ -515,6 +524,8 @@ def sdf(type: int, p: wp.vec3, attr: vec_pluginattr, sdf_type: int, volume_data:
 def sdf_grad(
   type: int, p: wp.vec3, attr: vec_pluginattr, sdf_type: int, volume_data: VolumeData, mesh_data: MeshData
 ) -> wp.vec3:
+  if volume_data.newton_sdf_index >= 0:
+    return texture_sample_sdf_grad_only_hw(volume_data.newton_sdf_data[volume_data.newton_sdf_index], p)
   # extract first 3 elements as vec3 for primitive sdf functions
   attr_vec3 = wp.vec3(attr[0], attr[1], attr[2])
   if type == GeomType.PLANE:
@@ -781,6 +792,8 @@ def _sdf_narrowphase(
   plugin: wp.array[int],
   plugin_attr: wp.array[vec_pluginattr],
   geom_plugin_index: wp.array[int],
+  geom_newton_sdf_index: wp.array[int],
+  newton_sdf_data: wp.array[TextureSDFData],
   # Data in:
   geom_xpos_in: wp.array2d[wp.vec3],
   geom_xmat_in: wp.array2d[wp.mat33],
@@ -918,6 +931,14 @@ def _sdf_narrowphase(
     g2_plugin,
     geom_dataid[dataid_setid, g2],
   )
+  newton_sdf1 = geom_newton_sdf_index[g1]
+  if newton_sdf1 >= 0:
+    volume_data1.newton_sdf_data = newton_sdf_data
+    volume_data1.newton_sdf_index = newton_sdf1
+  newton_sdf2 = geom_newton_sdf_index[g2]
+  if newton_sdf2 >= 0:
+    volume_data2.newton_sdf_data = newton_sdf_data
+    volume_data2.newton_sdf_index = newton_sdf2
 
   mesh_data1.nmeshface = nmeshface
   mesh_data1.mesh_vertadr = mesh_vertadr
@@ -1005,6 +1026,10 @@ def _sdf_narrowphase(
 
 @event_scope
 def sdf_narrowphase(m: Model, d: Data, ctx: CollisionContext):
+  # Preserve the original MJWarp paths for models that do not provide Newton textures.
+  if not hasattr(m, "geom_newton_sdf_index"):
+    m.geom_newton_sdf_index = wp.full(m.ngeom, -1, dtype=int, device=m.geom_type.device)
+    m.newton_sdf_data = wp.empty(0, dtype=TextureSDFData, device=m.geom_type.device)
   wp.launch(
     _sdf_narrowphase,
     dim=(m.opt.sdf_initpoints, d.naconmax),
@@ -1052,6 +1077,8 @@ def sdf_narrowphase(m: Model, d: Data, ctx: CollisionContext):
       m.plugin,
       m.plugin_attr,
       m.geom_plugin_index,
+      m.geom_newton_sdf_index,
+      m.newton_sdf_data,
       d.geom_xpos,
       d.geom_xmat,
       d.naconmax,
