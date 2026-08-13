@@ -463,11 +463,15 @@ class CollisionContext:
     collision_pair: collision pairs from broadphase             (naconmax, 2)
     collision_pairid: ids from broadphase                       (naconmax, 2)
     collision_worldid: collision world ids from broadphase      (naconmax,)
+    sdf_collision_index: indices of pairs containing an SDF     (naconmax,)
+    nsdfcollision: number of pairs containing an SDF             (1,)
   """
 
   collision_pair: wp.array
   collision_pairid: wp.array
   collision_worldid: wp.array
+  sdf_collision_index: wp.array
+  nsdfcollision: wp.array
 
 
 @wp.func
@@ -581,4 +585,6 @@ def create_collision_context(naconmax: int) -> CollisionContext:
     collision_pair=wp.empty(naconmax, dtype=wp.vec2i),
     collision_pairid=wp.empty(naconmax, dtype=wp.vec2i),
     collision_worldid=wp.empty(naconmax, dtype=int),
+    sdf_collision_index=wp.empty(naconmax, dtype=int),
+    nsdfcollision=wp.zeros(1, dtype=int),
   )
