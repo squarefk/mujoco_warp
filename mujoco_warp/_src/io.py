@@ -32,7 +32,89 @@ from mujoco_warp._src import warp_util
 from mujoco_warp._src.types import MJ_MINVAL
 from mujoco_warp._src.types import BiasType
 from mujoco_warp._src.types import TrnType
+from mujoco_warp._src.types import vec8
+from mujoco_warp._src.types import vec8i
 from mujoco_warp._src.types import vec10
+
+
+@wp.kernel
+def _correct_octree_signs(
+  mesh: wp.uint64,
+  oct_aabb: wp.array2d(dtype=wp.vec3),
+  oct_child: wp.array(dtype=vec8i),
+  oct_coeff: wp.array(dtype=vec8),
+  root: int,
+  max_distance: float,
+  winding_threshold: float,
+):
+  node = root + wp.tid()
+  children = oct_child[node]
+  if (
+    children[0] != -1
+    or children[1] != -1
+    or children[2] != -1
+    or children[3] != -1
+    or children[4] != -1
+    or children[5] != -1
+    or children[6] != -1
+    or children[7] != -1
+  ):
+    return
+
+  center = oct_aabb[node, 0]
+  half_size = oct_aabb[node, 1]
+  values = oct_coeff[node]
+  for corner in range(8):
+    point = center + wp.vec3(
+      half_size[0] if corner & 1 else -half_size[0],
+      half_size[1] if corner & 2 else -half_size[1],
+      half_size[2] if corner & 4 else -half_size[2],
+    )
+    query = wp.mesh_query_point_sign_winding_number(mesh, point, max_distance, 2.0, winding_threshold)
+    if query.result:
+      sign = query.sign
+      if winding_threshold < 0.0:
+        sign = -sign
+      values[corner] = wp.abs(values[corner]) * sign
+  oct_coeff[node] = values
+
+
+def _put_corrected_octree_signs(mjm: mujoco.MjModel, model: types.Model) -> None:
+  meshes = []
+  for mesh_id in np.flatnonzero(mjm.mesh_octadr >= 0):
+    vert_adr = int(mjm.mesh_vertadr[mesh_id])
+    vert_num = int(mjm.mesh_vertnum[mesh_id])
+    face_adr = int(mjm.mesh_faceadr[mesh_id])
+    face_num = int(mjm.mesh_facenum[mesh_id])
+    vertices = np.asarray(mjm.mesh_vert[vert_adr : vert_adr + vert_num], dtype=np.float32)
+    faces = np.asarray(mjm.mesh_face[face_adr : face_adr + face_num], dtype=np.int32)
+    triangles = vertices[faces]
+    signed_volume = np.einsum("ij,ij->", triangles[:, 0], np.cross(triangles[:, 1], triangles[:, 2])) / 6.0
+    winding_threshold = 0.5 if signed_volume >= 0.0 else -0.5
+
+    mesh = wp.Mesh(
+      points=wp.array(vertices, dtype=wp.vec3),
+      indices=wp.array(faces.reshape(-1), dtype=wp.int32),
+      support_winding_number=True,
+    )
+    meshes.append(mesh)
+    root = int(mjm.mesh_octadr[mesh_id])
+    half_size = np.asarray(mjm.oct_aabb[root]).reshape(2, 3)[1]
+    wp.launch(
+      _correct_octree_signs,
+      dim=int(mjm.mesh_octnum[mesh_id]),
+      inputs=[
+        mesh.id,
+        model.oct_aabb,
+        model.oct_child,
+        model.oct_coeff,
+        root,
+        4.0 * np.linalg.norm(half_size),
+        winding_threshold,
+      ],
+    )
+  if meshes:
+    wp.synchronize()
 
 
 def _is_array_spec(typ) -> bool:
@@ -1243,6 +1325,7 @@ def put_model(mjm: mujoco.MjModel, batch_sizes: dict[str, int] | None = None) ->
       batch_size = batch_sizes.get(f.name, 1)
       setattr(m, f.name, _create_array(getattr(m, f.name), f.type, sizes, batch_size))
 
+  _put_corrected_octree_signs(mjm, m)
   _mark_batched(m)
   return m
 
