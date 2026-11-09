@@ -385,6 +385,8 @@ def _add_geom_pair(
   collision_pair_out: wp.array[wp.vec2i],
   collision_pairid_out: wp.array[wp.vec2i],
   collision_worldid_out: wp.array[int],
+  sdf_collision_index_out: wp.array[int],
+  nsdfcollision_out: wp.array[int],
 ):
   cid = wp.atomic_add(ncollision_out, 0, 1)  # kernel_analyzer: ignore[atomic]
 
@@ -399,6 +401,9 @@ def _add_geom_pair(
   collision_pair_out[cid] = pair
   collision_pairid_out[cid] = pairid
   collision_worldid_out[cid] = worldid
+  if type1 == GeomType.SDF or type2 == GeomType.SDF:
+    sdf_pairid = wp.atomic_add(nsdfcollision_out, 0, 1)  # kernel_analyzer: ignore[atomic]
+    sdf_collision_index_out[sdf_pairid] = cid
 
 
 @wp.func
@@ -549,6 +554,8 @@ def _sap_broadphase(
     collision_pair_out: wp.array[wp.vec2i],
     collision_pairid_out: wp.array[wp.vec2i],
     collision_worldid_out: wp.array[int],
+    sdf_collision_index_out: wp.array[int],
+    nsdfcollision_out: wp.array[int],
   ):
     worldgeomid = wp.tid()
 
@@ -651,6 +658,8 @@ def _sap_broadphase(
           collision_pair_out,
           collision_pairid_out,
           collision_worldid_out,
+          sdf_collision_index_out,
+          nsdfcollision_out,
         )
 
   return kernel
@@ -831,6 +840,8 @@ def sap_broadphase(
       ctx.collision_pair,
       ctx.collision_pairid,
       ctx.collision_worldid,
+      ctx.sdf_collision_index,
+      ctx.nsdfcollision,
     ],
   )
 
@@ -875,6 +886,8 @@ def _nxn_broadphase(
     collision_pair_out: wp.array[wp.vec2i],
     collision_pairid_out: wp.array[wp.vec2i],
     collision_worldid_out: wp.array[int],
+    sdf_collision_index_out: wp.array[int],
+    nsdfcollision_out: wp.array[int],
   ):
     worldid, elementid = wp.tid()
 
@@ -954,6 +967,8 @@ def _nxn_broadphase(
         collision_pair_out,
         collision_pairid_out,
         collision_worldid_out,
+        sdf_collision_index_out,
+        nsdfcollision_out,
       )
 
   return kernel
@@ -1124,6 +1139,8 @@ def nxn_broadphase(
         ctx.collision_pair,
         ctx.collision_pairid,
         ctx.collision_worldid,
+        ctx.sdf_collision_index,
+        ctx.nsdfcollision,
       ],
     )
 
